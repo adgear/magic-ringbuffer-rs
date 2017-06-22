@@ -21,8 +21,6 @@
     variant_size_differences,
 )]
 
-#![feature(unique, try_from)]
-
 extern crate libc;
 
 use libc::{
@@ -36,7 +34,7 @@ use libc::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
     PROT_NONE, PROT_READ, PROT_WRITE,
 };
-use std::convert::TryFrom;
+
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
 use std::{ptr, slice};
@@ -64,17 +62,11 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl From<std::num::TryFromIntError> for Error {
-    fn from(_err: std::num::TryFromIntError) -> Error {
-        Error::OS
-    }
-}
-
 
 /// A magic ringbuffer.
 pub struct Buf {
     capacity: usize,
-    pointer: ptr::Unique<u8>,
+    pointer: *mut u8,
     read_idx: usize,
     write_idx: usize,
 }
@@ -84,7 +76,7 @@ impl std::fmt::Debug for Buf {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("Buf")
             .field("capacity", &self.capacity)
-            .field("pointer", unsafe {&self.pointer.as_ptr().offset(0)})
+            .field("pointer", unsafe {&self.pointer.offset(0)})
             .field("read_idx", &self.read_idx)
             .field("write_idx", &self.write_idx)
             .finish()
@@ -145,8 +137,11 @@ fn get_unlinked_shm_fd() -> Result<RawFd, Error> {
 }
 
 
-fn get_page_size() -> Result<usize, std::num::TryFromIntError> {
-    unsafe { usize::try_from(sysconf(_SC_PAGESIZE)) }
+fn get_page_size() -> Result<usize, Error> {
+    unsafe {
+        let page_size = sysconf(_SC_PAGESIZE);
+        if page_size < 0 { Err(Error::OS) } else { Ok(page_size as usize) }
+    }
 }
 
 
@@ -205,7 +200,7 @@ impl Buf {
 
             Ok(Buf {
                 capacity: size,
-                pointer: ptr::Unique::new(primary as *mut u8),
+                pointer: primary as *mut u8,
                 read_idx: 0,
                 write_idx: 0,
             })
@@ -264,7 +259,7 @@ impl Buf {
     /// Gets a slice of `self` which contains bytes that can be read.
     pub fn readable_slice(&self) -> &[u8] {
         unsafe {
-            slice::from_raw_parts(self.pointer.as_ptr().offset(self.read_idx as isize),
+            slice::from_raw_parts(self.pointer.offset(self.read_idx as isize),
                                   self.len())
         }
     }
@@ -272,7 +267,7 @@ impl Buf {
     /// Gets a mutable slice of `self` to which one can write bytes.
     pub fn writable_slice(&mut self) -> &mut [u8] {
         unsafe {
-            slice::from_raw_parts_mut(self.pointer.as_ptr().offset(self.write_idx as isize),
+            slice::from_raw_parts_mut(self.pointer.offset(self.write_idx as isize),
                                       self.n_free())
         }
     }
@@ -296,7 +291,7 @@ impl<'a> Iterator for BufIter<'a> {
         if self.idx >= self.end { return None }
         if Ok(()) != self.buf.consume(1) { return None }
         self.idx += 1;
-        Some(unsafe {*self.buf.pointer.as_ptr().offset(self.idx as isize - 1)})
+        Some(unsafe {*self.buf.pointer.offset(self.idx as isize - 1)})
     }
 }
 
@@ -307,7 +302,7 @@ impl Drop for Buf {
             // It's not clear what makes the most sense for handling
             // errors in `drop`, but the consensus seems to be either
             // ignore the error, or panic.
-            if munmap(self.pointer.as_ptr().offset(0) as *mut c_void, 2*self.capacity) < 0 {
+            if munmap(self.pointer.offset(0) as *mut c_void, 2*self.capacity) < 0 {
                 panic!("munmap({:p}, {}) failed", self.pointer, 2*self.capacity)
             }
         }
